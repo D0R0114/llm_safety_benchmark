@@ -5,4 +5,5 @@ __pycache__/
 *.py[cod]
 .DS_Store
 Thumbs.db
-.classify_checkpoint.jsonl
+# Large output (use .xz instead)
+data/safety_benchmark.jsonl

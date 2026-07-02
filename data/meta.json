@@ -1,10 +1,11 @@
 {
   "version": "1.0.0",
   "created_date": "2026-07-02",
-  "total_cases": 2965,
-  "num_categories": 11,
+  "total_cases": 268242,
+  "num_categories": 12,
   "categories": [
     "bias_fairness_and_representation",
+    "child_safety",
     "criminal_and_illegal_activity",
     "information_integrity_and_manipulation",
     "other_or_uncertain",
@@ -17,17 +18,18 @@
     "violence_and_physical_harm"
   ],
   "category_counts": {
-    "bias_fairness_and_representation": 37,
-    "criminal_and_illegal_activity": 6,
-    "information_integrity_and_manipulation": 7,
-    "other_or_uncertain": 89,
-    "personal_information_privacy_and_intellectual_property": 40,
-    "regulated_goods_and_advice": 3,
-    "safe": 2309,
-    "self_harm_and_suicide": 5,
-    "sexual_content": 16,
-    "toxicity": 189,
-    "violence_and_physical_harm": 264
+    "bias_fairness_and_representation": 5962,
+    "child_safety": 14,
+    "criminal_and_illegal_activity": 101,
+    "information_integrity_and_manipulation": 157,
+    "other_or_uncertain": 1428,
+    "personal_information_privacy_and_intellectual_property": 776,
+    "regulated_goods_and_advice": 72,
+    "safe": 212146,
+    "self_harm_and_suicide": 66,
+    "sexual_content": 7550,
+    "toxicity": 28682,
+    "violence_and_physical_harm": 11288
   },
   "data_sources": [
     "allenai/real-toxicity-prompts",
