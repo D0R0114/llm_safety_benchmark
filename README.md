@@ -1,7 +1,7 @@
 # LLM Safety Benchmark
 
 A single-turn safety test case library for plain-text LLMs, built from
-4 public datasets with **human-annotated labels**. No classifier needed.
+4 public datasets.
 
 ## Quick Start
 
@@ -89,7 +89,7 @@ Each line in `data/safety_benchmark.jsonl`:
 **Deduplication**: Exact match (hash set) + MinHash LSH (threshold 0.85).
 
 **Label source**: Human-annotated original labels from each dataset, mapped to the
-17-category taxonomy. No ML classifier — instant build, no false positives.
+17-category taxonomy.
 
 ## Project Structure
 
@@ -106,15 +106,6 @@ llm-safety-benchmark/
 ├── README.md
 └── LICENSE
 ```
-
-## Version History
-
-| Version | Date | Records | Categories | Method |
-|---------|------|---------|------------|--------|
-| v4.0.0 | 2026-07-02 | 314,558 | 16 | 4 datasets, human labels |
-| v3.0.0 | 2026-07-02 | 268,242 | 12 | 3 datasets, human labels |
-| v2.0.0 | 2026-07-02 | 2,965 | 11 | 3 datasets × 1k, human labels |
-| v1.0.0 | 2026-07-02 | 26,924 | 16 | 3 datasets × 10k, Opir classifier |
 
 ## License
 
