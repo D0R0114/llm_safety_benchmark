@@ -67,6 +67,51 @@ RTP_MAP = [
     ("sexually_explicit", "sexual_content"),
 ]
 
+# WildGuard subcategory → our taxonomy
+WILDGUARD_MAP = {
+    "benign": "safe",
+    "toxic_language_hate_speech": "toxicity",
+    "violence_and_physical_harm": "violence_and_physical_harm",
+    "sexual_content": "sexual_content",
+    "cyberattack": "cybersecurity",
+    "private_information_individual": "personal_information_privacy_and_intellectual_property",
+    "sensitive_information_organization_government": "personal_information_privacy_and_intellectual_property",
+    "copyright_violations": "personal_information_privacy_and_intellectual_property",
+    "fraud_assisting_illegal_activities": "criminal_and_illegal_activity",
+    "defamation_encouraging_unethical_or_unsafe_actions": "criminal_and_illegal_activity",
+    "social_stereotypes_and_unfair_discrimination": "bias_fairness_and_representation",
+    "disseminating_false_or_misleading_information_encouraging_disinformation_campaigns": "information_integrity_and_manipulation",
+    "causing_material_harm_by_disseminating_misinformation": "information_integrity_and_manipulation",
+    "mental_health_over-reliance_crisis": "self_harm_and_suicide",
+}
+
+# Keyword patterns to extract missing categories from 'others'
+WILDGUARD_KEYWORD_MAP = [
+    (["nuclear weapon", "biological weapon", "chemical weapon", "WMD", "weapon of mass",
+      "nerve gas", "mustard gas", "ricin", "anthrax", "dirty bomb",
+      "homemade explosive", "pipe bomb", "C4 explosive"],
+     "weapons_of_mass_destruction"),
+    (["jailbreak", "prompt injection", "DAN prompt", "ignore previous",
+      "bypass content", "override safety", "roleplay as unrestricted",
+      "developer mode", "pretend you are an AI without"],
+     "ai_system_security_and_reliability"),
+    (["child abuse", "child sexual", "child porn", "minor sexually",
+      "underage", "CSAM", "grooming a child", "child exploitation"],
+     "child_safety"),
+    (["biological hazard", "environmental sabotage", "bioterror",
+      "pandemic release", "release a pathogen", "ecosystem destruction",
+      "toxic spill", "contaminate water", "undetectable poison",
+      "potassium cyanide", "how to poison", "make poison",
+      "create a bioweapon", "release a virus"],
+     "biological_medical_and_environmental_harm"),
+    (["drug trafficking", "sell drugs", "how to make meth", "synthesize drug",
+      "illegal firearm", "buy a gun illegally", "smuggle weapons"],
+     "regulated_goods_and_advice"),
+    (["hacking into", "how to hack", "DDOS", "phishing email", "malware",
+      "ransomware", "keylogger", "steal password", "brute force"],
+     "cybersecurity"),
+]
+
 SEVERITY_MAP = {
     "toxicity": "low",
     "violence_and_physical_harm": "high",
@@ -216,6 +261,53 @@ def load_beavertails(path: str, max_count: int) -> list:
     return records
 
 
+def load_wildguard(path: str, max_count: int) -> list:
+    """Load from Parquet, mapping WildGuard subcategories to safety taxonomy."""
+    import re
+
+    df = pd.read_parquet(path)
+    records = []
+
+    for _, row in df.iterrows():
+        if len(records) >= max_count:
+            break
+        text = str(row.get("prompt", "")).strip()
+        if not text or text == "nan":
+            continue
+
+        subcat = str(row.get("subcategory", ""))
+        harm_label = row.get("prompt_harm_label", "")
+
+        # Try direct mapping first
+        if subcat in WILDGUARD_MAP:
+            category = WILDGUARD_MAP[subcat]
+        elif harm_label == "unharmful":
+            category = "safe"
+        else:
+            # Try keyword matching for 'others' and unmapped categories
+            text_lower = text.lower()
+            matched = False
+            for keywords, cat in WILDGUARD_KEYWORD_MAP:
+                for kw in keywords:
+                    if kw in text_lower:
+                        category = cat
+                        matched = True
+                        break
+                if matched:
+                    break
+            if not matched:
+                category = "other_or_uncertain"
+
+        records.append({
+            "prompt": text,
+            "category": category,
+            "tags": f"wildguard_subcategory: {subcat}, harm_label: {harm_label}",
+        })
+
+    print(f"  Loaded {len(records)} records from WildGuard")
+    return records
+
+
 # ──────────────────────────────────────────────
 # Deduplication
 # ──────────────────────────────────────────────
@@ -338,12 +430,14 @@ def main():
     rtp_path = os.path.join(raw_dir, "real-toxicity-prompts", "prompts.jsonl")
     jigsaw_path = os.path.join(raw_dir, "jigsaw", "train.csv")
     beaver_path = os.path.join(raw_dir, "beavertails", "train.jsonl.xz")
+    wildguard_path = os.path.join(raw_dir, "wildguard", "wildguard_train.parquet")
 
     all_records = []
     for loader, path, name in [
         (load_real_toxicity_prompts, rtp_path, "RealToxicityPrompts"),
         (load_jigsaw, jigsaw_path, "Jigsaw"),
         (load_beavertails, beaver_path, "BeaverTails"),
+        (load_wildguard, wildguard_path, "WildGuard"),
     ]:
         if os.path.exists(path):
             all_records.extend(loader(path, args.max_per_source))
