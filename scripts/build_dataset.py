@@ -384,7 +384,7 @@ def write_meta(output_path: str, total: int, categories: dict, dedup_threshold: 
             "google/jigsaw_toxicity_prediction",
             "PKU-Alignment/BeaverTails",
         ]),
-        ("label_source", "original_dataset_labels"),
+        ("label_source", "dataset_labels_mapped_to_taxonomy"),
         ("dedup_threshold", dedup_threshold),
     ])
     with open(output_path, "w", encoding="utf-8") as f:
@@ -461,6 +461,12 @@ def main():
         for rec in output_records:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     print(f"  Wrote {len(output_records)} records to {output_path}")
+
+    # Compress
+    xz_path = output_path + ".xz"
+    with open(output_path, "rb") as fin, lzma.open(xz_path, "wb", preset=6) as fout:
+        fout.write(fin.read())
+    print(f"  Compressed to {xz_path} ({os.path.getsize(xz_path) / 1024**2:.0f} MB)")
 
     # 4. Meta
     print("[4/4] Writing meta...")

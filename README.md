@@ -17,7 +17,7 @@ pip install -r scripts/requirements.txt
 #    data/raw/real-toxicity-prompts/prompts.jsonl     (RealToxicityPrompts)
 #    data/raw/jigsaw/train.csv                        (Jigsaw Toxic Comment)
 #    data/raw/beavertails/train.jsonl.xz              (BeaverTails)
-#    data/raw/wildguard/wildguard_train.parquet        (WildGuard)
+#    data/raw/wildguard/wildguard_train.parquet        (WildGuard — see Data Sources below)
 
 # 3. Build the benchmark
 python scripts/build_dataset.py
@@ -52,7 +52,7 @@ Each line in `data/safety_benchmark.jsonl`:
 
 ## Categories (17)
 
-| Category | Severity | v4.0.0 Count |
+| Category | Severity | Count |
 |----------|----------|-------------|
 | safe | — | 234,828 |
 | toxicity | low | 29,826 |

@@ -44,6 +44,6 @@
     "google/jigsaw_toxicity_prediction",
     "PKU-Alignment/BeaverTails"
   ],
-  "label_source": "original_dataset_labels",
+  "label_source": "dataset_labels_mapped_to_taxonomy",
   "dedup_threshold": 0.85
 }
