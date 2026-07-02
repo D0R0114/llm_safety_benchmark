@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-LLM Safety Benchmark — Build Dataset Pipeline.
+LLM Safety Benchmark — Build Dataset Pipeline (Label-Based).
 
-Loads prompts from 3 public datasets, deduplicates them, classifies each prompt
-using the Opir-multitask-large-v1.0 safety classifier, and outputs a labeled
-JSONL benchmark file.
+Loads prompts from 3 public datasets, maps their original labels to the
+17-category safety taxonomy, deduplicates, and outputs a labeled JSONL benchmark.
+
+No classifier needed — uses the datasets' own human-annotated labels.
 
 Usage:
-    python scripts/build_dataset.py                          # defaults: 10k/source, CPU
-    python scripts/build_dataset.py --max-per-source 100     # test with small sample
-    python scripts/build_dataset.py --device cuda --batch-size 32
+    python scripts/build_dataset.py                        # defaults: 1k/source
+    python scripts/build_dataset.py --max-per-source 100   # test with small sample
 """
 
 import argparse
@@ -24,87 +24,196 @@ import pandas as pd
 from datasketch import MinHash, MinHashLSH
 from tqdm import tqdm
 
-# Allow running from project root
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# ──────────────────────────────────────────────
+# Label mapping: original dataset labels → safety taxonomy
+# ──────────────────────────────────────────────
 
-from classifier import SafetyClassifier, TOP_LEVEL_SAFETY_LABELS
+# BeaverTails boolean categories → our taxonomy
+BEAVERTAILS_MAP = {
+    "hate_speech,offensive_language": "toxicity",
+    "violence,aiding_and_abetting,incitement": "violence_and_physical_harm",
+    "self_harm": "self_harm_and_suicide",
+    "sexually_explicit,adult_content": "sexual_content",
+    "child_abuse": "child_safety",
+    "privacy_violation": "personal_information_privacy_and_intellectual_property",
+    "financial_crime,property_crime,theft": "criminal_and_illegal_activity",
+    "terrorism,organized_crime": "criminal_and_illegal_activity",
+    "drug_abuse,weapons,banned_substance": "regulated_goods_and_advice",
+    "misinformation_regarding_ethics,laws_and_safety": "information_integrity_and_manipulation",
+    "discrimination,stereotype,injustice": "bias_fairness_and_representation",
+    "non_violent_unethical_behavior": "other_or_uncertain",
+    "controversial_topics,politics": "other_or_uncertain",
+    "animal_abuse": "violence_and_physical_harm",
+}
+
+# Jigsaw binary columns → our taxonomy
+JIGSAW_MAP = [
+    ("toxic", "toxicity"),
+    ("severe_toxic", "toxicity"),
+    ("obscene", "sexual_content"),
+    ("threat", "violence_and_physical_harm"),
+    ("insult", "toxicity"),
+    ("identity_hate", "bias_fairness_and_representation"),
+]
+
+# RealToxicityPrompts score fields → our taxonomy (continuous scores)
+RTP_MAP = [
+    ("toxicity", "toxicity"),
+    ("severe_toxicity", "toxicity"),
+    ("insult", "toxicity"),
+    ("profanity", "toxicity"),
+    ("threat", "violence_and_physical_harm"),
+    ("identity_attack", "bias_fairness_and_representation"),
+    ("sexually_explicit", "sexual_content"),
+]
+
+SEVERITY_MAP = {
+    "toxicity": "low",
+    "violence_and_physical_harm": "high",
+    "self_harm_and_suicide": "high",
+    "sexual_content": "low",
+    "child_safety": "high",
+    "personal_information_privacy_and_intellectual_property": "medium",
+    "cybersecurity": "medium",
+    "criminal_and_illegal_activity": "high",
+    "regulated_goods_and_advice": "high",
+    "biological_medical_and_environmental_harm": "high",
+    "weapons_of_mass_destruction": "high",
+    "information_integrity_and_manipulation": "medium",
+    "ai_system_security_and_reliability": "high",
+    "bias_fairness_and_representation": "medium",
+    "other_or_uncertain": "medium",
+}
 
 
 # ──────────────────────────────────────────────
-# Model setup
-# ──────────────────────────────────────────────
-
-def setup_model(model_path: str) -> bool:
-    """Verify the model directory has all required files.
-
-    Returns True if model is ready, False if files are missing.
-    """
-    required = ["config.json", "tokenizer.json", "tokenizer_config.json", "model.safetensors"]
-    missing = [f for f in required if not os.path.exists(os.path.join(model_path, f))]
-    if missing:
-        print(f"[ERROR] Model files missing from {model_path}:")
-        for f in missing:
-            print(f"  - {f}")
-        print(f"Please download them from https://huggingface.co/knowledgator/opir-multitask-large-v1.0")
-        return False
-    return True
-
-
-# ──────────────────────────────────────────────
-# Data loaders — each capped at max_per_source
+# Data loaders — extract prompts + original labels
 # ──────────────────────────────────────────────
 
 def load_real_toxicity_prompts(path: str, max_count: int) -> list:
-    """Load from JSONL, extract prompt.text field. Take first max_count."""
-    prompts = []
+    """Load from JSONL, mapping toxicity scores to safety categories."""
+    records = []
     with open(path, "r", encoding="utf-8") as f:
         for line in tqdm(f, desc="Loading RealToxicityPrompts", unit="lines"):
-            if len(prompts) >= max_count:
+            if len(records) >= max_count:
                 break
             try:
                 obj = json.loads(line.strip())
                 text = obj.get("prompt", {}).get("text", "")
-                if text and text.strip():
-                    prompts.append(text.strip())
-            except json.JSONDecodeError:
+                if not text or not text.strip():
+                    continue
+                prompt = text.strip()
+
+                # Gather all risk scores
+                scores = {}
+                for field, cat in RTP_MAP:
+                    val = obj.get("prompt", {}).get(field, 0) or 0
+                    scores[cat] = max(scores.get(cat, 0), val)
+
+                # Find highest-scoring category
+                max_score = max(scores.values())
+                if max_score < 0.5:
+                    category = "safe"
+                else:
+                    # Pick the max-score category (first in case of tie)
+                    category = max(scores, key=scores.get)
+
+                tags_str = ", ".join(f"{k}={v:.2f}" for k, v in
+                                     sorted(scores.items(), key=lambda x: -x[1]))
+
+                records.append({
+                    "prompt": prompt,
+                    "category": category,
+                    "tags": f"original_scores: {tags_str}",
+                })
+            except (json.JSONDecodeError, KeyError):
                 continue
-    print(f"  Loaded {len(prompts)} prompts from RealToxicityPrompts")
-    return prompts
+    print(f"  Loaded {len(records)} records from RealToxicityPrompts")
+    return records
 
 
 def load_jigsaw(path: str, max_count: int) -> list:
-    """Load from CSV, extract comment_text field. Take first max_count."""
-    prompts = []
-    for chunk in pd.read_csv(path, chunksize=10000, usecols=["comment_text"]):
-        if len(prompts) >= max_count:
+    """Load from CSV, mapping binary toxicity columns to safety categories."""
+    records = []
+    for chunk in pd.read_csv(path, chunksize=10000,
+                             usecols=["comment_text", "toxic", "severe_toxic",
+                                      "obscene", "threat", "insult", "identity_hate"]):
+        if len(records) >= max_count:
             break
-        texts = chunk["comment_text"].dropna().tolist()
-        for t in texts:
-            if len(prompts) >= max_count:
+        for _, row in chunk.iterrows():
+            if len(records) >= max_count:
                 break
-            s = str(t).strip()
-            if s:
-                prompts.append(s)
-    print(f"  Loaded {len(prompts)} prompts from Jigsaw")
-    return prompts
+            text = str(row.get("comment_text", "")).strip()
+            if not text or text == "nan":
+                continue
+
+            # Collect triggered labels
+            triggered = []
+            for col, cat in JIGSAW_MAP:
+                if int(row.get(col, 0)) == 1:
+                    triggered.append((col, cat))
+
+            if not triggered:
+                category = "safe"
+                tags_str = "all_original_labels=0"
+            else:
+                # Pick first triggered label as primary category
+                tags_parts = [f"{col}=1" for col, cat in triggered]
+                tags_str = ", ".join(tags_parts)
+                category = triggered[0][1]  # first match wins
+
+            records.append({
+                "prompt": text,
+                "category": category,
+                "tags": f"original_labels: {tags_str}",
+            })
+    print(f"  Loaded {len(records)} records from Jigsaw")
+    return records
 
 
 def load_beavertails(path: str, max_count: int) -> list:
-    """Load from XZ-compressed JSONL, extract prompt field. Take first max_count."""
-    prompts = []
+    """Load from XZ-compressed JSONL, mapping boolean category flags."""
+    records = []
     with lzma.open(path, "rt", encoding="utf-8") as f:
         for line in tqdm(f, desc="Loading BeaverTails", unit="lines"):
-            if len(prompts) >= max_count:
+            if len(records) >= max_count:
                 break
             try:
                 obj = json.loads(line.strip())
                 text = obj.get("prompt", "")
-                if text and text.strip():
-                    prompts.append(text.strip())
-            except json.JSONDecodeError:
+                if not text or not text.strip():
+                    continue
+
+                is_safe = obj.get("is_safe", False)
+                cat_dict = obj.get("category", {})
+
+                if is_safe:
+                    category = "safe"
+                    tags_str = "is_safe=true"
+                else:
+                    # Find which categories are flagged true
+                    triggered = []
+                    for orig_label, our_cat in BEAVERTAILS_MAP.items():
+                        if cat_dict.get(orig_label, False):
+                            triggered.append((orig_label, our_cat))
+
+                    if not triggered:
+                        category = "other_or_uncertain"
+                        tags_str = "no_category_flagged"
+                    else:
+                        tags_parts = [f"{ol}=true" for ol, _ in triggered]
+                        tags_str = ", ".join(tags_parts)
+                        category = triggered[0][1]  # first match wins
+
+                records.append({
+                    "prompt": text.strip(),
+                    "category": category,
+                    "tags": f"original_labels: {tags_str}",
+                })
+            except (json.JSONDecodeError, KeyError):
                 continue
-    print(f"  Loaded {len(prompts)} prompts from BeaverTails")
-    return prompts
+    print(f"  Loaded {len(records)} records from BeaverTails")
+    return records
 
 
 # ──────────────────────────────────────────────
@@ -112,33 +221,33 @@ def load_beavertails(path: str, max_count: int) -> list:
 # ──────────────────────────────────────────────
 
 def _build_minhash(text: str, num_perm: int = 128) -> MinHash:
-    """Build a MinHash signature using character trigrams."""
     m = MinHash(num_perm=num_perm)
     for i in range(len(text) - 2):
         m.update(text[i:i + 3].encode("utf-8"))
     return m
 
 
-def deduplicate(prompts: list, threshold: float = 0.85) -> list:
-    """Two-phase dedup: exact match (set) then MinHash LSH near-dedup."""
-    # Phase 1: exact match
+def deduplicate(records: list, threshold: float = 0.85) -> list:
+    """Two-phase dedup: exact match on prompt text, then MinHash LSH."""
+    # Phase 1: exact match by prompt text
     seen = set()
     exact_unique = []
-    for p in tqdm(prompts, desc="Exact dedup"):
+    for r in tqdm(records, desc="Exact dedup"):
+        p = r["prompt"]
         if p not in seen:
             seen.add(p)
-            exact_unique.append(p)
-    print(f"  After exact dedup: {len(exact_unique)} (removed {len(prompts) - len(exact_unique)})")
+            exact_unique.append(r)
+    print(f"  After exact dedup: {len(exact_unique)} "
+          f"(removed {len(records) - len(exact_unique)})")
 
-    # Phase 2: MinHash LSH near-dedup
+    # Phase 2: MinHash LSH
     lsh = MinHashLSH(threshold=threshold, num_perm=128)
     near_unique = []
-    for i, p in enumerate(tqdm(exact_unique, desc="MinHash dedup")):
-        m = _build_minhash(p)
-        result = lsh.query(m)
-        if not result:
+    for i, r in enumerate(tqdm(exact_unique, desc="MinHash dedup")):
+        m = _build_minhash(r["prompt"])
+        if not lsh.query(m):
             lsh.insert(i, m)
-            near_unique.append(p)
+            near_unique.append(r)
 
     print(f"  After MinHash dedup (threshold={threshold}): {len(near_unique)} "
           f"(removed {len(exact_unique) - len(near_unique)})")
@@ -146,112 +255,28 @@ def deduplicate(prompts: list, threshold: float = 0.85) -> list:
 
 
 # ──────────────────────────────────────────────
-# Classification
+# Output
 # ──────────────────────────────────────────────
 
-def load_checkpoint(path: str) -> tuple:
-    """Load checkpoint file. Returns (completed_indices, completed_results)."""
-    indices = set()
-    results = {}  # index -> result dict
-    if not os.path.exists(path):
-        return indices, results
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            try:
-                rec = json.loads(line.strip())
-                idx = rec["index"]
-                indices.add(idx)
-                results[idx] = {
-                    "category": rec["category"],
-                    "severity": rec["severity"],
-                    "tags": rec["tags"],
-                }
-            except json.JSONDecodeError:
-                continue
-    return indices, results
-
-
-def classify_prompts(
-    prompts: list,
-    classifier: SafetyClassifier,
-    checkpoint_path: str = None,
-    resume: bool = False,
-) -> list:
-    """Classify all prompts with progress bar and periodic checkpointing."""
-    results = []
-    start_idx = 0
-
-    if resume and checkpoint_path:
-        completed_indices, completed_results = load_checkpoint(checkpoint_path)
-        if completed_indices:
-            results = [completed_results.get(i) for i in range(len(prompts))]
-            results = [r if r is not None else None for r in results]
-            start_idx = len(completed_indices)
-            print(f"  Resuming from checkpoint: {start_idx}/{len(prompts)} already classified, "
-                  f"{len(prompts) - start_idx} remaining")
-
-    checkpoint_interval = 500
-
-    for i, prompt in enumerate(tqdm(prompts, desc="Classifying"), start=0):
-        if i < start_idx:
-            continue
-        res = classifier.classify(prompt)
-        # Extend results if needed
-        while len(results) <= i:
-            results.append(None)
-        results[i] = res
-
-        # Save checkpoint periodically
-        if checkpoint_path and (i + 1) % checkpoint_interval == 0:
-            _save_checkpoint(checkpoint_path, prompts[:i + 1], [r for r in results[:i + 1] if r is not None])
-
-    # Final checkpoint
-    if checkpoint_path:
-        final_results = [r for r in results if r is not None]
-        _save_checkpoint(checkpoint_path, prompts[:len(final_results)], final_results)
-
-    # Ensure all results are filled
-    results = [r if r is not None else {"category": "safe", "severity": "safe", "tags": ""} for r in results]
-    return results
-
-
-def _save_checkpoint(path: str, prompts: list, classifications: list):
-    """Save intermediate results to a checkpoint file."""
-    with open(path, "w", encoding="utf-8") as f:
-        for j, (prompt, cls) in enumerate(zip(prompts, classifications)):
-            record = {
-                "index": j,
-                "prompt": prompt,
-                "category": cls["category"],
-                "severity": cls["severity"],
-                "tags": cls["tags"],
-            }
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
-# ──────────────────────────────────────────────
-# Output formatting
-# ──────────────────────────────────────────────
-
-def format_output(prompts: list, classifications: list) -> list:
-    """Combine prompts and classification results into final records."""
-    records = []
-    for i, (prompt, cls) in enumerate(zip(prompts, classifications)):
+def format_output(records: list) -> list:
+    """Assign IDs, attach severity."""
+    output = []
+    for i, r in enumerate(records):
+        cat = r["category"]
+        severity = SEVERITY_MAP.get(cat, "safe") if cat != "safe" else "safe"
         record = OrderedDict([
             ("id", f"safety-{i + 1:06d}"),
-            ("category", cls["category"]),
-            ("prompt", prompt),
-            ("tags", [cls["tags"]] if cls["tags"] else []),
-            ("severity", cls["severity"]),
+            ("category", cat),
+            ("prompt", r["prompt"]),
+            ("tags", [r["tags"]] if r["tags"] else []),
+            ("severity", severity),
             ("notes", ""),
         ])
-        records.append(record)
-    return records
+        output.append(record)
+    return output
 
 
-def write_meta(output_path: str, total: int, categories: dict, dedup_threshold: float,
-               classification_threshold: float, data_sources: list):
-    """Generate meta.json with version and statistics."""
+def write_meta(output_path: str, total: int, categories: dict, dedup_threshold: float):
     category_names = sorted(categories.keys())
     meta = OrderedDict([
         ("version", "1.0.0"),
@@ -262,9 +287,12 @@ def write_meta(output_path: str, total: int, categories: dict, dedup_threshold: 
         ("category_counts", OrderedDict(
             (cat, categories.get(cat, 0)) for cat in category_names
         )),
-        ("data_sources", data_sources),
-        ("classifier", "knowledgator/opir-multitask-large-v1.0"),
-        ("classification_threshold", classification_threshold),
+        ("data_sources", [
+            "allenai/real-toxicity-prompts",
+            "google/jigsaw_toxicity_prediction",
+            "PKU-Alignment/BeaverTails",
+        ]),
+        ("label_source", "original_dataset_labels"),
         ("dedup_threshold", dedup_threshold),
     ])
     with open(output_path, "w", encoding="utf-8") as f:
@@ -278,148 +306,86 @@ def write_meta(output_path: str, total: int, categories: dict, dedup_threshold: 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Build LLM Safety Benchmark dataset",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Build LLM Safety Benchmark from original dataset labels",
     )
-    parser.add_argument("--device", default="cpu",
-                        help="Device for inference: 'cpu' or 'cuda' (default: cpu)")
-    parser.add_argument("--batch-size", type=int, default=16,
-                        help="Batch size (default: 16)")
-    parser.add_argument("--threshold", type=float, default=0.5,
-                        help="Classification confidence threshold (default: 0.5)")
+    parser.add_argument("--max-per-source", type=int, default=1000,
+                        help="Max records per source (default: 1000)")
     parser.add_argument("--dedup-threshold", type=float, default=0.85,
                         help="MinHash LSH dedup threshold (default: 0.85)")
-    parser.add_argument("--max-per-source", type=int, default=10000,
-                        help="Max prompts to load from each source (default: 10000)")
-    parser.add_argument("--model-path", default=None,
-                        help="Path to model directory (default: models/opir-multitask-large-v1.0)")
     parser.add_argument("--raw-dir", default=None,
                         help="Path to raw data directory (default: data/raw)")
     parser.add_argument("--output-dir", default=None,
                         help="Path for output files (default: data/)")
-    parser.add_argument("--skip-classification", action="store_true",
-                        help="Skip classification (useful for testing pipeline)")
-    parser.add_argument("--resume", action="store_true",
-                        help="Resume classification from checkpoint file")
     args = parser.parse_args()
 
-    # Resolve paths relative to project root
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    model_path = args.model_path or os.path.join(project_root, "models", "opir-multitask-large-v1.0")
     raw_dir = args.raw_dir or os.path.join(project_root, "data", "raw")
     output_dir = args.output_dir or os.path.join(project_root, "data")
 
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, "safety_benchmark.jsonl")
     meta_path = os.path.join(output_dir, "meta.json")
-    checkpoint_path = os.path.join(output_dir, ".classify_checkpoint.jsonl")
 
     print("=" * 60)
-    print("LLM Safety Benchmark — Build Pipeline")
+    print("LLM Safety Benchmark — Label-Based Build Pipeline")
     print("=" * 60)
-    print(f"Device:       {args.device}")
     print(f"Max/source:   {args.max_per_source}")
-    print(f"Threshold:    {args.threshold}")
     print(f"Dedup thresh: {args.dedup_threshold}")
-    print(f"Model:        {model_path}")
-    print(f"Raw data:     {raw_dir}")
-    print(f"Output:       {output_dir}")
     print()
 
-    # 1. Verify model
-    print("[1/6] Checking model...")
-    if not setup_model(model_path):
-        sys.exit(1)
-    print("  Model files OK")
-
-    # 2. Load raw data
-    print("[2/6] Loading raw data...")
+    # 1. Load raw data with original labels
+    print("[1/4] Loading data with original labels...")
     rtp_path = os.path.join(raw_dir, "real-toxicity-prompts", "prompts.jsonl")
     jigsaw_path = os.path.join(raw_dir, "jigsaw", "train.csv")
     beaver_path = os.path.join(raw_dir, "beavertails", "train.jsonl.xz")
 
-    all_prompts = []
+    all_records = []
     for loader, path, name in [
         (load_real_toxicity_prompts, rtp_path, "RealToxicityPrompts"),
         (load_jigsaw, jigsaw_path, "Jigsaw"),
         (load_beavertails, beaver_path, "BeaverTails"),
     ]:
         if os.path.exists(path):
-            all_prompts.extend(loader(path, args.max_per_source))
+            all_records.extend(loader(path, args.max_per_source))
         else:
             print(f"  [WARNING] {name}: file not found at {path}, skipping.")
-            print(f"    Download from the HuggingFace Dataset Hub and place in data/raw/")
 
-    if not all_prompts:
-        print("[ERROR] No prompts loaded. Please download the datasets first.")
+    if not all_records:
+        print("[ERROR] No records loaded. Please download the datasets first.")
         sys.exit(1)
-    print(f"  Total raw prompts: {len(all_prompts)}")
+    print(f"  Total raw records: {len(all_records)}")
 
-    # 3. Deduplicate
-    print("[3/6] Deduplicating...")
-    unique_prompts = deduplicate(all_prompts, threshold=args.dedup_threshold)
-    print(f"  Unique prompts: {len(unique_prompts)}")
+    # 2. Deduplicate
+    print("[2/4] Deduplicating...")
+    unique_records = deduplicate(all_records, threshold=args.dedup_threshold)
+    print(f"  Unique records: {len(unique_records)}")
 
-    # 4. Classify
-    if args.skip_classification:
-        print("[4/6] Skipping classification (--skip-classification)")
-        classifications = [{"category": "safe", "severity": "safe", "tags": ""}
-                          for _ in unique_prompts]
-    else:
-        print("[4/6] Classifying prompts...")
-        print("  WARNING: CPU classification is slow. Use --device cuda if available.")
-        print(f"  Estimated time on CPU: ~{len(unique_prompts) * 0.5 / 3600:.1f} hours")
-        print(f"  Estimated time on GPU: ~{len(unique_prompts) * 0.02 / 60:.1f} minutes")
-
-        classifier = SafetyClassifier(
-            model_path=model_path,
-            device=args.device,
-            threshold=args.threshold,
-        )
-        classifications = classify_prompts(
-            unique_prompts, classifier,
-            checkpoint_path=checkpoint_path,
-            resume=args.resume,
-        )
-
-    # 5. Format and write output
-    print("[5/6] Writing output...")
-    records = format_output(unique_prompts, classifications)
+    # 3. Format and write output
+    print("[3/4] Writing output...")
+    output_records = format_output(unique_records)
     with open(output_path, "w", encoding="utf-8") as f:
-        for record in records:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    print(f"  Wrote {len(records)} records to {output_path}")
+        for rec in output_records:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    print(f"  Wrote {len(output_records)} records to {output_path}")
 
-    # 6. Write meta
-    print("[6/6] Writing meta...")
+    # 4. Meta
+    print("[4/4] Writing meta...")
     category_counts = {}
-    for r in records:
+    for r in output_records:
         cat = r["category"]
         category_counts[cat] = category_counts.get(cat, 0) + 1
-    write_meta(
-        meta_path, len(records), category_counts,
-        dedup_threshold=args.dedup_threshold,
-        classification_threshold=args.threshold,
-        data_sources=[
-            "allenai/real-toxicity-prompts",
-            "google/jigsaw_toxicity_prediction",
-            "PKU-Alignment/BeaverTails",
-        ],
-    )
+    write_meta(meta_path, len(output_records), category_counts, args.dedup_threshold)
 
-    # Summary
     print()
     print("=" * 60)
     print("BUILD COMPLETE")
     print("=" * 60)
-    print(f"Total cases:  {len(records)}")
+    print(f"Total cases:  {len(output_records)}")
     print(f"Categories:   {len(category_counts)}")
-    print(f"Output:       {output_path}")
-    print(f"Meta:         {meta_path}")
     print()
     print("Category distribution:")
     for cat, count in sorted(category_counts.items(), key=lambda x: -x[1]):
-        pct = count / len(records) * 100
+        pct = count / len(output_records) * 100
         print(f"  {cat:.<55s} {count:>6d} ({pct:>5.1f}%)")
 
 
