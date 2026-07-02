@@ -1,0 +1,50 @@
+{
+  "version": "1.0.0",
+  "created_date": "2026-07-02",
+  "total_cases": 26924,
+  "num_categories": 16,
+  "categories": [
+    "ai_system_security_and_reliability",
+    "bias_fairness_and_representation",
+    "biological_medical_and_environmental_harm",
+    "child_safety",
+    "criminal_and_illegal_activity",
+    "cybersecurity",
+    "information_integrity_and_manipulation",
+    "other_or_uncertain",
+    "personal_information_privacy_and_intellectual_property",
+    "regulated_goods_and_advice",
+    "safe",
+    "self_harm_and_suicide",
+    "sexual_content",
+    "toxicity",
+    "violence_and_physical_harm",
+    "weapons_of_mass_destruction"
+  ],
+  "category_counts": {
+    "ai_system_security_and_reliability": 1294,
+    "bias_fairness_and_representation": 3429,
+    "biological_medical_and_environmental_harm": 463,
+    "child_safety": 322,
+    "criminal_and_illegal_activity": 771,
+    "cybersecurity": 80,
+    "information_integrity_and_manipulation": 3602,
+    "other_or_uncertain": 356,
+    "personal_information_privacy_and_intellectual_property": 4341,
+    "regulated_goods_and_advice": 576,
+    "safe": 3664,
+    "self_harm_and_suicide": 231,
+    "sexual_content": 805,
+    "toxicity": 6217,
+    "violence_and_physical_harm": 722,
+    "weapons_of_mass_destruction": 51
+  },
+  "data_sources": [
+    "allenai/real-toxicity-prompts",
+    "google/jigsaw_toxicity_prediction",
+    "PKU-Alignment/BeaverTails"
+  ],
+  "classifier": "knowledgator/opir-multitask-large-v1.0",
+  "classification_threshold": 0.5,
+  "dedup_threshold": 0.85
+}
